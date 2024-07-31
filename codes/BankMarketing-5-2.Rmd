@@ -1,0 +1,364 @@
+---
+title: "Bank_Marketing090922"
+output: html_document
+date: '2022-09-10'
+---
+
+
+```{r setup, include=FALSE}
+library(logistf)
+library(ggplot2)
+library(dplyr)
+library(tidyverse)
+library(corrplot)
+library(lattice)
+library(caret)
+library(MASS)
+library(caTools)
+
+
+library(gam)
+library(tidyverse)
+library(car)
+library(broom)
+library(DescTools)
+library(ROCR)
+library(lmtest)
+
+
+
+#getwd()#"/Users/judith/Desktop/DA 6813 Data APPLICATION/02. Case Studies/01. Bank Marketing"
+```
+
+
+```{r}
+#import data
+bank = read.csv("bank-additional.csv", header=TRUE, sep = ";", stringsAsFactors=TRUE)
+
+# To see the classes of our data
+str(bank)
+```
+
+DATA CLEANING
+Step 1: Identify and remove missing records
+```{r}
+#To identify all rows w/ 'unknown' in data set. 
+#1,029 obs w/ 'unknown'. 
+missing = bank %>%
+ filter(if_any(everything(), ~str_detect(tolower(.), "unknown")))
+
+#To convert 'unknowns' to NA and count by cols. 
+#Note: "Default" predictor has 803 obs w/NAs. Team to remove. 
+missing = na_if(missing, 'unknown')
+colSums(is.na(missing))
+
+#To convert 'unknowns' to NAs in new working data set. 
+bank1 <- bank %>% na_if('unknown') %>% drop_na() 
+
+#To remove 'Default' predictor due to significant amount of unknowns and lack of diversity in values (only 1 yes).
+bank1 <- bank1[-c(5)]
+
+#To view updated df with 3,090 obs and 20 predictors
+str(bank1)
+
+```
+
+DATA CLEANING
+Step 2: Format Predictors Pdays and Education
+```{r}
+#To change pdays to binomial
+bank1$pdays2 <- ifelse(bank1$pdays == 999, 0,1)
+
+#To reduce categories in education
+bank1$education2 <- ifelse(bank1$education=='basic.4y'|bank1$education=='basic.6y'|bank1$education=='basic.9y'| bank1$education=='illiterate','< high.school', ifelse(bank1$education=='high.school','high.school', ifelse(bank1$education=='professional.course', 'professional.course', 'university.degree' )))
+
+#To remove original education and pdays predictors, respectively
+bank1 <- bank1[-c(4,12)]
+
+#To convert to as.factors
+bank1$pdays2<- as.factor(bank1$pdays2)
+bank1$education2<- as.factor(bank1$education2)
+
+#To view updated stats for updated df bank1
+summary(bank1)
+```
+
+
+
+
+DATA EXPLORATION
+Histograms for Numeric Predictors
+```{r}
+#Note: consider center and scaling predictors
+
+par(mfrow=c(2,2))
+hist(bank1$age, xlab="Age", main="Age \nHistogram", labels = TRUE)
+hist(bank1$duration, xlab="Duration", main="Last Contact Duration (in sec) \nHistogram", labels = TRUE)
+hist(bank1$campaign, xlab="Campaign", main="Num of Contacts in Campaign", labels=TRUE)
+hist(bank1$previous, xlab="Previous", main="Num of Contacts \nBefore Campaign", labels = TRUE)
+
+```
+DATA EXPLORATION II
+Frequency Counts for Categorical Variables
+```{r}
+library(cowplot)
+
+#Job Predictor
+c1<- ggplot(bank1, aes(x=job))+geom_bar(fill='blue')+theme_minimal()+theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))+ggtitle("Count by Job Type")
+
+#MaritalStatus
+c2<-ggplot(bank1, aes(x=marital))+geom_bar(fill='blue')+theme_minimal()+ggtitle("Count by Marital Status")
+
+#Education
+c3<-ggplot(bank1, aes(x=education2))+geom_bar(fill='blue')+theme_minimal()+theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))+ggtitle("Count by Education")
+
+#Default - useless predictor. Remove Predictor.
+#c4<-ggplot(bank1, aes(x=default))+geom_bar(fill='blue')+theme_minimal()+ggtitle("Count by Credit in Default (Y/N)")
+
+#Housing loan
+c5<-ggplot(bank1, aes(x=housing))+geom_bar(fill='blue')+theme_minimal()+ggtitle("Count by Housing Loan (Y/N)")
+
+#Loan (Custmr has a personal loan? Y/N) 
+##Large % of No's may be useless. 
+c6<-ggplot(bank1, aes(x=loan))+geom_bar(fill='blue')+theme_minimal()+ggtitle("Count by Personal Loan (Y/N)")
+
+#Contact Method - consider removing...telephone and cell are same thing
+c7<-ggplot(bank1, aes(x=contact))+geom_bar(fill='blue')+theme_minimal()+ggtitle("Count by Contact Method")
+
+#Month
+c8<-ggplot(bank1, aes(x=month))+geom_bar(fill='blue')+theme_minimal()+theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))+ggtitle("Count by Month")
+
+#pdays
+c4<- ggplot(bank1, aes(x=pdays2))+ geom_bar(fill='blue')+ theme_minimal()+ ggtitle("Num of Days Since Contact \nfrom Last Campaign")
+
+#Response (y)
+c9<-ggplot(bank1, aes(x=y))+geom_bar(fill='purple')+theme_minimal()+ggtitle("Count by Response (y)")
+
+plot_grid(c1,c2,c3, c4, c5, c6, c7, c8, c9)
+```
+
+Imbalanced Response Data
+As seen on the data exploration, responses labeled 'yes' totaled 370 while 'no's were 2,720.
+To fix the imbalanced response data, we sampled 370 no's and combined to the yes responses to create a new data set from which to train and test.  
+```{r}
+#extract all yes and nos from y
+bank1_yes <- bank1 %>% filter(y=='yes') #total 370 obs
+bank1_no <- bank1%>% filter(y=='no')
+
+#sample 370 obs from y=='no'
+set.seed(100)
+bank1_no_sample<- sample_n(bank1_no, 370)
+
+#combine sample nos and all yes' for a balanced data set
+bank2 <- rbind(bank1_no_sample, bank1_yes)
+dim(bank2)
+
+#Duplicate the bank2 for predicting for use other method
+bank22<- bank2
+
+#80/20 train/test split
+set.seed(100)
+sample <-sample.split(bank2, SplitRatio = 0.8)
+train<- subset(bank2, sample== TRUE)
+test<- subset(bank2,sample ==FALSE)
+
+#Duplicate the train for predicting for use other method
+train2<- train
+test2<-test
+
+dim(train)
+dim(test)
+```
+
+
+ATTEMPT #1 - Fit entire model - Complex
+
+```{r}
+#Attempt #1 includes all predictors in train df
+##include in glm formula ", control = list(maxit=50)"???
+
+glm.fit1<- glm(y~., data=train, family = binomial())
+#summary(glm.fit1)
+
+#predictions saved to test df
+test$GLM1Predsx <- predict(glm.fit1, test, type='response')
+
+#covert probability predictions to yes/no format to match y (response variable)
+test$GLM1Preds <- ifelse(test$GLM1Predsx>=0.5,"yes", "no")
+
+# Confusion matrix to compare accuracy
+caret::confusionMatrix(as.factor(test$GLM1Preds), test$y)
+
+```
+
+Simplify Model Complexity
+```{r}
+#Consider AIC to reduce terms
+
+#MASS package
+step(glm.fit1, direction = "both")
+
+```
+
+
+
+ATTEMPT #2 - Simple model
+#Applied the simplified model from step procedure above and checked evaluated results
+```{r}
+
+glm.fit2<- glm(y~ contact + month + duration + campaign + emp.var.rate + 
+    cons.price.idx + cons.conf.idx + pdays2, data=train, family = binomial())
+#summary(glm.fit2)
+
+#predictions saved to test df
+test$GLM2Predsx <- predict(glm.fit2, test, type='response')
+
+#covert probability predictions to yes/no format to match y (response variable)
+test$GLM2Preds <- ifelse(test$GLM2Predsx>=0.5,"yes", "no")
+
+# Confusion matrix to compare accuracy
+caret::confusionMatrix(as.factor(test$GLM2Preds), test$y)
+
+```
+
+
+ATTEMPT #3 - Refine cut-off of 0.5
+#USING TRAIN DATA TO PLOT ROC(glm.fit2)
+
+```{r}
+#ROC Curve and AUC
+
+pred <- prediction(predict(glm.fit2, train, type = "response"),train$y)
+```
+
+
+```{r}
+# area under curve
+auc <- round(as.numeric(performance(pred, measure = "auc")@y.values),3)
+
+```
+
+
+```{r}
+# some important statistics
+false.rates <-performance(pred, "fpr","fnr")
+accuracy <-performance(pred, "acc","err")
+perf <- performance(pred, "tpr","fpr")
+```
+
+
+```{r}
+#plotting the ROC curve and computing AUC
+plot(perf,colorize = T, main = "ROC Curve")
+text(0.5,0.5, paste("AUC:", auc))
+
+# computing threshold for cutoff to best trade off sensitivity and specificity
+#first sensitivity
+plot(unlist(performance(pred, "sens")@x.values), unlist(performance(pred, "sens")@y.values), 
+     type="l", lwd=2, 
+     ylab="Sensitivity", xlab="Cutoff", main = paste("Maximized Cutoff\n","AUC: ",auc))
+
+par(new=TRUE) # plot another line in same plot
+
+#second specificity
+plot(unlist(performance(pred, "spec")@x.values), unlist(performance(pred, "spec")@y.values), 
+     type="l", lwd=2, col='red', ylab="", xlab="")
+axis(4, at=seq(0,1,0.2)) #specificity axis labels
+mtext("Specificity",side=4, col='red')
+
+
+
+#find where the lines intersect
+min.diff <-which.min(abs(unlist(performance(pred, "sens")@y.values) - unlist(performance(pred, "spec")@y.values)))
+min.x<-unlist(performance(pred, "sens")@x.values)[min.diff]
+min.y<-unlist(performance(pred, "spec")@y.values)[min.diff]
+optimal <-min.x #this is the optimal points to best trade off sensitivity and specificity
+
+abline(h = min.y, lty = 3)
+abline(v = min.x, lty = 3)
+text(min.x,0,paste("optimal threshold=",round(optimal,2)), pos = 4)
+```
+
+
+
+
+
+
+ATTEMPT #3_JF Cut-off Adj
+```{r}
+#0.56 cut-off
+#covert probability predictions to yes/no format to match y (response variable)
+test$GLM3_CutoffAdj_Preds <- ifelse(test$GLM2Predsx>=0.56,"yes", "no")
+
+# Confusion matrix to compare accuracy
+caret::confusionMatrix(as.factor(test$GLM3_CutoffAdj_Preds), test$y)
+
+```
+
+
+
+
+
+ATTEMPT#4_JF - Pre-processing skewed data
+#center and scale training data. Then re-run predictions & compare results.
+```{r}
+set.seed(100)
+preProcValues <- preProcess(train, method = c("center", "scale"))
+
+#transformed data sets
+trainTransformed <- predict(preProcValues, train)
+testTransformed <- predict(preProcValues, test)
+
+
+glm.fit4<- glm(y~ contact + month + duration + campaign + emp.var.rate + 
+    cons.price.idx + cons.conf.idx + pdays2, data=trainTransformed, family = binomial())
+#summary(glm.fit4)
+
+#predictions saved to test df
+testTransformed$GLM4Predsx <- predict(glm.fit4, testTransformed, type='response')
+
+#covert probability predictions to yes/no format to match y (response variable)
+testTransformed$GLM4_Trans_Preds <- ifelse(testTransformed$GLM4Predsx>=0.56,"yes", "no")
+
+# Confusion matrix to compare accuracy
+caret::confusionMatrix(as.factor(testTransformed$GLM4_Trans_Preds), testTransformed$y)
+
+```
+
+
+
+
+
+ATTEMPT #5_JF
+#Run LDA model and compare results 
+```{r}
+# LDA modeling 
+lda.model <- lda(y~ contact + month + duration + campaign + emp.var.rate + cons.price.idx + cons.conf.idx + pdays2, family = binomial()  , data=train) 
+
+# View the output
+lda.model
+
+
+# Predicting for the testing dataset we created
+predictions.lda <- predict (lda.model, test) #note predicted on test
+
+
+# Make confusion matrix for the LDA predictions to compare accuracy Note that class was where predictions were stored in previous "predict" fcn
+caret::confusionMatrix(as.factor(predictions.lda$class), as.factor(test$y))
+```
+
+
+
+
+
+
+
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
